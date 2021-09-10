@@ -471,7 +471,7 @@ var (
 	_ = template.Must(localHandlerTemplate.New("local-request-func-signature").Parse(strings.Replace(`
 {{if .Method.GetServerStreaming}}
 {{else}}
-func local_request_{{.Method.Service.GetName}}_{{.Method.GetName}}_{{.Index}}(ctx context.Context, marshaler runtime.Marshaler, server {{.Method.Service.InstanceName}}Server, req *http.Request, pathParams map[string]string) (proto.Message, runtime.ServerMetadata, error)
+func local_request_{{.Method.Service.GetName}}_{{.Method.GetName}}_{{.Index}}(ctx context.Context, marshaler runtime.Marshaler, server {{.Method.Service.InstanceName}}Server, req *http.Request, pathParams map[string]string, interceptor grpc.UnaryServerInterceptor) (proto.Message, runtime.ServerMetadata, error)
 {{end}}`, "\n", "", -1)))
 
 	_ = template.Must(localHandlerTemplate.New("local-client-rpc-request-func").Parse(`
@@ -562,8 +562,22 @@ func local_request_{{.Method.Service.GetName}}_{{.Method.GetName}}_{{.Index}}(ct
 {{if .Method.GetServerStreaming}}
 	// TODO
 {{else}}
-	msg, err := server.{{.Method.GetName}}(ctx, &protoReq)
-	return msg, metadata, err
+	if msg, err := _{{.Method.Service.GetName}}_{{.Method.GetName}}_Handler(server, ctx, func(in interface{}) error {
+		if p, ok := in.(*{{.Method.RequestType.GoType .Method.Service.File.GoPkg.Path}}); ok {
+			*p = protoReq
+		}
+		return nil
+	}, interceptor); err == nil {
+		if data, ok := msg.(proto.Message); ok {
+			return data, metadata, nil
+		}
+		return nil, metadata, status.Error(codes.Internal, "type assert fail")
+	} else {
+		if s, ok := status.FromError(err); ok {
+			return nil, metadata, s.Err()
+		}
+		return nil, metadata, status.Errorf(codes.Internal, "%v", err)
+	}
 {{end}}
 }`))
 
@@ -574,7 +588,7 @@ func local_request_{{.Method.Service.GetName}}_{{.Method.GetName}}_{{.Index}}(ct
 // UnaryRPC     :call {{$svc.GetName}}Server directly.
 // StreamingRPC :currently unsupported pending https://github.com/grpc/grpc-go/issues/906.
 // Note that using this registration option will cause many gRPC library features to stop working. Consider using Register{{$svc.GetName}}{{$.RegisterFuncSuffix}}FromEndpoint instead.
-func Register{{$svc.GetName}}{{$.RegisterFuncSuffix}}Server(ctx context.Context, mux *runtime.ServeMux, server {{$svc.InstanceName}}Server) error {
+func Register{{$svc.GetName}}{{$.RegisterFuncSuffix}}Server(ctx context.Context, mux *runtime.ServeMux, server {{$svc.InstanceName}}Server, interceptor grpc.UnaryServerInterceptor) error {
 	{{range $m := $svc.Methods}}
 	{{range $b := $m.Bindings}}
 	{{if or $m.GetClientStreaming $m.GetServerStreaming}}
@@ -604,7 +618,7 @@ func Register{{$svc.GetName}}{{$.RegisterFuncSuffix}}Server(ctx context.Context,
 			runtime.HTTPError(ctx, mux, outboundMarshaler, w, req, err)
 			return
 		}
-		resp, md, err := local_request_{{$svc.GetName}}_{{$m.GetName}}_{{$b.Index}}(rctx, inboundMarshaler, server, req, pathParams)
+		resp, md, err := local_request_{{$svc.GetName}}_{{$m.GetName}}_{{$b.Index}}(rctx, inboundMarshaler, server, req, pathParams, interceptor)
 		md.HeaderMD, md.TrailerMD = metadata.Join(md.HeaderMD, stream.Header()), metadata.Join(md.TrailerMD, stream.Trailer())
 		ctx = runtime.NewServerMetadataContext(ctx, md)
 		if err != nil {
